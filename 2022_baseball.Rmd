@@ -1,0 +1,821 @@
+## データの読み込み
+```{R library}
+library(tidyverse)
+library(ggplot2)
+library(psych)
+library(Matching)
+```
+
+```{r データ処理}
+play_info_2021 <- read_csv(file("~/Desktop/スポーツコンペ/2022_baseball/play_info_2021.csv"))
+game_pitching <- read_csv(file("~/Desktop/スポーツコンペ/2022_baseball/game_pitching.csv"))
+game_batting <- read_csv(file("~/Desktop/スポーツコンペ/2022_baseball/game_batting.csv"))
+
+# play_info_2021 <- read.csv("~/Desktop/院研究/2022_baseball/play_info_2021.csv", fileEncoding = "utf8")
+
+guess_encoding("~/Desktop/スポーツコンペ/2022_baseball/play_info_2021.csv")
+```
+
+```{R 前準備}
+columnList <- c("game_id","game_date","stadium_id","pitcher_id","batter_id",
+                "pitch_result","pa_result",
+                "pitch_type_id","pitch_speed",
+                "pitch_location_x","pitch_location_y",
+                "pitch_target_location_x","pitch_target_location_y",
+                "pitch_zone",
+                "is_strike","is_ball","is_foul","is_swing",
+                "pitcher_handedness","batter_handedness"
+                )
+
+head(play_info_2021[,columnList], 10)
+# columnListをheaderとするデータを抽出
+play_info_2021_pra <- play_info_2021[,columnList]
+names(play_info_2021_pra)   # コラム確認
+
+play_info_2021_pra %>%
+  dplyr::group_by(pitcher_handedness, batter_handedness) %>%
+  dplyr::summarise(count=n())
+```
+
+## データの絞り込み
+```{R play_info_2021_pra_1empty作成}
+columnList <- c("game_id","game_date","pitcher_id","batter_id","batter_team_id","inning","top_bottom_id",
+                "is_bb", "is_ibb", "is_ubb",                            # 四球, 故意四球, 非故意四球flag
+                "rec_pitcher_id", "rec_batter_id","is_pa",              # 成績が記録される投手ID, 打者ID
+                "batting_order",  # 打順
+                "is_strike","is_ball","is_foul","is_swing",
+                "pre_out", "post_out",                                  # アウトカウント
+                "pre_runner_situation","post_runner_situation",         # 走者状況(前後)
+                "pre_home_team_score_diff","post_home_team_score_diff" # スコア状況(前後)
+                )
+
+# columnListをheaderとするデータを抽出
+play_info_2021_pra <- play_info_2021[,columnList]
+
+# 1塁空いている状態での結果
+play_info_2021_pra_1empty <- play_info_2021_pra %>%
+  filter((pre_runner_situation=="010")|(pre_runner_situation=="001")|(pre_runner_situation=="011")) %>%
+  filter((-3<=pre_home_team_score_diff)&(pre_home_team_score_diff<=3)) %>%
+  filter(pre_out==1|pre_out==2) %>%   # 1アウトと2アウトに限定
+  filter(is_pa==1)
+
+# 1塁空いている状態での四球
+FB_esc <- play_info_2021_pra_1empty %>%
+  filter((pre_runner_situation=="010")|(pre_runner_situation=="001")|(pre_runner_situation=="011")) %>%
+  filter((-3<=pre_home_team_score_diff)&(pre_home_team_score_diff<=3)) %>%
+  filter(is_ibb==1)
+```
+
+## データ加工
+```{r 各シチュエーションの数}
+dplyr::group_by(play_info_2021_pra_1empty, is_ibb, pre_out, pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+```
+
+```{r situation整理}
+###########################
+# 敬遠するイニング (is_ibb_inning)
+###########################
+info <- c("game_id","inning","top_bottom_id")
+
+# 敬遠イニングの打撃結果31392例
+tmp <- dplyr::select(play_info_2021_pra_1empty, info)
+is_ibb_inning <- play_info_2021_pra %>% 
+  dplyr::inner_join(tmp, by=info) %>% 
+  filter(is_pa==1)
+is_ibb_inning
+
+
+x1 <- is_ibb_inning %>% 
+  distinct(game_id,inning,top_bottom_id,pitcher_id,batter_id, .keep_all = TRUE)
+x2 <- is_ibb_inning %>% 
+  distinct(game_id,inning,top_bottom_id,batter_id, .keep_all = TRUE)
+x1 %>% 
+  anti_join(x2)
+
+# 3アウトを取った時
+p <- inning_non_ibb %>%
+  filter(post_out==3) %>%
+  distinct(game_id, inning, top_bottom_id)
+
+q <- inning_non_ibb2 %>%
+  anti_join(p)
+
+dplyr::right_join(inning_non_ibb, q, by=c("game_id","inning","top_bottom_id"))
+
+```
+
+
+```{r 敬遠nextのアウト}
+# 次のバッターの行(198)
+inning_is_ibb <- inning_is_ibb %>% 
+  mutate(lag_pre_out = lag(pre_out, n=1)) %>% 
+  mutate(lag_post_out = lag(post_out, n=1))
+next_ibb <- inning_is_ibb[grep(1, inning_is_ibb$is_ibb)+1,]
+batter_ibb <- inning_is_ibb[grep(1, inning_is_ibb$is_ibb),]
+
+# nextバッターの情報に申告敬遠する時の状況を追加
+next_ibb <- next_ibb[,colnames(next_ibb)!="pre_runner_situation"] %>%
+  cbind(batter_ibb["pre_runner_situation"])
+
+# batter_ibbに次の打者情報(next_ibb)を追加
+
+
+next_ibb %>%
+  group_by(pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+
+
+# アウト取れた(156)
+record_out <- next_ibb %>%
+  filter(post_out!=pre_out)
+
+# 取れなかった(49)
+record_noout <- next_ibb %>%
+  filter(post_out==pre_out)
+
+###########
+# アウト取れたけど点とられた(7)
+record_out %>%
+  filter(pre_home_team_score_diff!=post_home_team_score_diff)
+
+# アウト取れなかったけど、点はとられなかった(21)
+record_noout %>%
+  filter(pre_home_team_score_diff==post_home_team_score_diff)
+# のうち四球(14)
+record_noout %>%
+  filter(pre_home_team_score_diff==post_home_team_score_diff) %>%
+  filter(is_bb==1)
+```
+
+
+```{r 層分け inning_is_ibb & inning_non_ibb & 標準化}
+#####
+# 全体
+#####
+play_info_2021_pra_1empty %>%
+  dplyr::group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+
+#############################
+# inning_is_ibbの層分け
+#############################
+play_info_2021_pra_1empty %>%
+  filter(is_ibb==1) %>%
+  filter((-3<=pre_home_team_score_diff)&(pre_home_team_score_diff<=3)) %>%
+  dplyr::group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+
+FB_esc %>%
+  group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+
+A <- FB_esc %>%
+  dplyr::group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n()) %>%
+  dplyr::ungroup()
+B <- record_out %>%
+  dplyr::group_by(pre_out, pre_runner_situation) %>%
+  dplyr::summarise(count=n()) %>%
+  dplyr::ungroup()
+
+AB <- A %>%
+  inner_join(B, by=c("pre_out","pre_runner_situation"))
+AB <- AB %>%
+  mutate(prob_esc = count.y/count.x)
+
+record_out %>%
+  dplyr::group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+sayonara_inning %>%
+  filter(is_ibb==1) %>%
+  dplyr::group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n())
+
+#############################
+# inning_non_ibbの層分け
+#############################
+# 塁別で数をカウント
+inning_non_ibb %>%
+  count(pre_runner_situation)
+
+# アウトと塁別で数をカウント
+a <- inning_non_ibb %>%
+  dplyr::group_by(pre_out,pre_runner_situation) %>%
+  dplyr::summarise(count=n()) %>%
+  dplyr::ungroup()
+
+b <- rec_non %>%
+  dplyr::group_by(pre_out, pre_runner_situation) %>%
+  dplyr::summarise(count=n())  %>%
+  dplyr::ungroup()
+
+ab <- a %>%
+  inner_join(b, by=c("pre_out","pre_runner_situation"))
+ab <- ab %>%
+  mutate(prob = count.y/count.x)
+
+abAB <- inner_join(AB,ab, by=c("pre_out","pre_runner_situation"))
+abAB <- abAB %>%
+  mutate(count_sum = count.x.x + count.x.y) %>%
+  dplyr::select(-count.x.x, -count.x.y, -count.y.x, -count.y.y)
+
+abAB <- abAB %>%
+  mutate(S_esc = prob_esc*count_sum) %>%
+  mutate(S = prob*count_sum)
+abAB
+
+abAB_sum <- abAB %>%
+  dplyr::select(count_sum, S_esc, S) %>%
+  apply(2,sum)
+abAB_sum
+```
+## 変数
+```{r 成績を求めるのに必要な変数 & 共変量を選ぶ操作}
+# 打者データ、投手データ
+gb_2021 <- game_batting %>%
+  filter(game_id>2021000000)
+gp_2021 <- game_pitching %>%
+  filter(game_id>2021000000)
+
+# 指標を作るためのしたごしらえ
+batter_index <- c("gs","pa","ab","h","h1b","h2b","h3b","hr","tb",
+                                  "rbi","bb","hbp","ibb","sh","sf"
+                                  )
+pitcher_index <- c("gs","w","l","sv","hld",
+                                  "ip","ip_frac","bf","ab","h","h1b","h2b","h3b","hr","tb",
+                                  "bb","hbp","ibb","sh","sf","so",
+                                  "r","er","np")
+
+# 投手の共変量
+pitch_X <- c("player_id", "inning_total", "OAV", "K_prob", "BB_prob", "ab_sum", "h_sum", "so_sum", "bb_sum", "hbp_sum", "er_sum")
+sel_p_columns <- c("pitcher_id")
+
+# 打者の共変量
+batting_X <- c("player_id", "pa_sum", "AVE", "SLG", "OBP", "ab_sum", "h_sum", "tb_sum", 
+               "bb_sum", "hbp_sum", "sf_sum")
+sel_b_columns <- c("lag_pitcher_id", "batter_id", "lag_batter_id", "lag_inning", "lag_top_bottom_id", "lag_pre_out", "lag_post_out", "lag_runner_situation")
+```
+
+```{r 共変量に加える成績を算出(2021)}
+#####
+# battingまとめ
+#####
+names(gb_2021)
+game_batting_2021 <- gb_2021 %>%
+  dplyr::group_by(player_id) %>%
+  dplyr::summarise_each_(funs = c(dplyr::funs(sum)), 
+                         vars = batter_index)
+game_batting_2021 <- game_batting_2021 %>%
+  mutate(AVE = h_sum/ab_sum) %>%   # 打率
+  mutate(SLG = tb_sum/ab_sum) %>%  # 長打率
+  mutate(OBP = (h_sum+bb_sum+hbp_sum)/(ab_sum+bb_sum+hbp_sum+sf_sum)) # 出塁率
+
+#####
+# pitchingまとめ
+#####
+game_pitching_2021 <- gp_2021 %>%
+  dplyr::group_by(player_id) %>%
+  dplyr::summarise_each_(funs = c(dplyr::funs(sum)),
+                         vars = pitcher_index)
+
+game_pitching_2021 <- game_pitching_2021 %>%
+  mutate(inning_total = ip_sum+ip_frac_sum/3) %>%  # 投球イニング
+  mutate(OAV = h_sum/ab_sum) %>%  # 被安打率 
+  mutate(K_prob = so_sum*9/inning_total) %>%  # 奪三振率
+  mutate(BB_prob = bb_sum*9/inning_total) %>% # 与四球率
+  mutate(ERA = er_sum*9/inning_total)   # 自責点
+```
+
+## 入れたい変数はこちら
+```{r ピッチャー}
+pitch <- game_pitching_2021 %>%
+  dplyr::select(pitch_X)
+
+#########
+# 敬遠時
+#########
+# 現在の投手の成績を記録
+pitcher_ibb <- now_ibb %>%
+  dplyr::select(sel_p_columns) %>%
+  left_join(pitch, by=c("pitcher_id"="player_id"))
+
+Z1 <- pitcher_ibb %>%
+  colSums
+
+print("======敬遠時========")
+# 被打率
+print(Z1["h_sum"]/Z1["ab_sum"])
+
+# 奪三振率
+print(Z1["so_sum"]*9/Z1["inning_total"])
+
+# 与四死球率
+print((Z1["bb_sum"]+Z1["hbp_sum"])*9/Z1["inning_total"])
+
+# 防御率
+print(Z1["er_sum"]*9/Z1["inning_total"])
+
+
+#########
+# 敬遠しない時
+#########
+pitcher_non_ibb <- inning_non_ibb %>%
+  dplyr::select(sel_p_columns) %>%
+  left_join(pitch,  by=c("pitcher_id"="player_id"))
+Z3 <- pitcher_non_ibb %>%
+  colSums()
+
+print("=====敬遠なし======")
+# 被打率
+print(Z3["h_sum"]/Z3["ab_sum"])
+
+# 奪三振率
+print(Z3["so_sum"]*9/Z3["inning_total"])
+
+# 与四死球率
+print((Z3["bb_sum"]+Z3["hbp_sum"])*9/Z3["inning_total"])
+
+# 防御率
+print(Z3["er_sum"]*9/Z3["inning_total"])
+
+pitcher_non_ibb %>%
+  colMeans()
+
+```
+
+```{r バッター 敬遠時}
+batt <- game_batting_2021 %>%
+  dplyr::select(batting_X)
+
+#########
+# 敬遠時
+#########
+# nextと現在を厳選
+next_ibb <- inning_is_ibb[grep(1, inning_is_ibb$is_ibb)+1,]
+now_ibb <- inning_is_ibb[grep(1, inning_is_ibb$is_ibb),]
+
+# 現在の打者と次の打者の成績を記録
+sel_columns <- c("batter_id","pre_out","post_out")
+next_b_ibb <- next_ibb %>%
+  dplyr::select(sel_columns) %>%
+  left_join(batt, by=c("batter_id"="player_id"))
+batter_ibb <- now_ibb %>%
+  dplyr::select(sel_columns) %>%
+  left_join(batt, by=c("batter_id"="player_id"))
+
+# z1->現在の打者
+z1 <- batter_ibb %>%
+  colSums
+# z2->次の打者
+z2 <- next_b_ibb %>%
+  colSums
+
+print("======敬遠時======")
+# 打率
+print(z1["h_sum"]/z1["ab_sum"])
+print(z2["h_sum"]/z2["ab_sum"])
+
+# 長打率
+print(z1["tb_sum"]/z1["ab_sum"])
+print(z2["tb_sum"]/z2["ab_sum"])
+
+# 出塁率
+print((z1["bb_sum"]+z1["h_sum"]+z1["hbp_sum"])/(z1["ab_sum"]+z1["bb_sum"]+z1["hbp_sum"]+z1["sf_sum"]))
+print((z2["bb_sum"]+z2["h_sum"]+z2["hbp_sum"])/(z2["ab_sum"]+z2["bb_sum"]+z2["hbp_sum"]+z2["sf_sum"]))
+
+batter_ibb %>%
+  colMeans()
+next_b_ibb %>%
+  colMeans()
+```
+
+```{r バッター 敬遠しない時}
+#########
+# 敬遠しない時
+#########
+# フラグ追加処理
+data <- play_info_2021 %>% 
+  filter(is_pa==1) %>%
+  dplyr::select(columnList) %>% 
+  mutate(row_num = row_number()) %>% 
+  arrange(game_id,top_bottom_id,row_num) %>% 
+  mutate(lag_top_bottom_id = lag(top_bottom_id,default = 1)) %>% 
+  mutate(ining_last=if_else(post_out == 3, 1, 0)) %>% 
+  mutate(want_batter = lag(ining_last, default = 0)) %>% 
+  mutate(change_team = if_else(top_bottom_id == lag_top_bottom_id,0,1)) %>% 
+  mutate(want_batter = case_when(
+    change_team == 0 & want_batter == 1 ~ 1,
+    TRUE ~0
+  ))
+
+# ランナーシチュエーション1個ずらし
+next_data <- data %>%
+  mutate(lag_runner_situation = lag(pre_runner_situation, n=1)) %>% 
+  mutate(lag_home_team_score_diff = lag(pre_home_team_score_diff, n=1)) %>% 
+  mutate(lag_pre_out = lag(pre_out, n=1)) %>% 
+  mutate(lag_post_out = lag(post_out, n=1)) %>% 
+  mutate(lag_ibb = lag(is_ibb, n=1)) %>%
+  mutate(lag_pitcher_id = lag(pitcher_id, n=1)) %>% 
+  mutate(lag_batter_id = lag(batter_id, n=1)) %>% 
+  mutate(lag_inning = lag(inning, n=1)) %>% 
+  mutate(lag_top_bottom_id = lag(top_bottom_id, n=1)) %>% 
+  mutate(lag_pre_out = lag(pre_out, n=1))
+           
+next_data
+
+# 同じチーム内で次の打者を特定
+next_data2 <- next_data %>%
+  filter((lag_runner_situation=="010")|(lag_runner_situation=="001")|(lag_runner_situation=="011")) %>%
+  filter((-3<=lag_home_team_score_diff)&(lag_home_team_score_diff<=3)) %>%
+  filter(lag_pre_out==1|lag_pre_out==2) %>%  # 1アウトと2アウトに限定
+  filter(lag_ibb!=1) %>%
+  filter(change_team==0)
+next_data2
+
+
+batt <- game_batting_2021 %>%
+  dplyr::select(batting_X)
+
+batter_non_ibb <- next_data2 %>%
+  dplyr::select(sel_b_columns) %>%
+  left_join(pitch, by=c("lag_pitcher_id"="player_id")) %>%  # 投手情報
+  left_join(batt, by=c("batter_id"="player_id")) %>%  # .x(ネクストバッター)
+  left_join(batt, by=c("lag_batter_id"="player_id"))  # .y(現在のバッター)
+z3 <- batter_non_ibb %>%
+  dplyr::select(-lag_runner_situation) %>% 
+  colSums()
+
+print("======敬遠なし=========")
+# 打率
+print(z3["h_sum.x"]/z3["ab_sum.x"])
+print(z3["h_sum.y"]/z3["ab_sum.y"])
+
+# 長打率
+print(z3["tb_sum.x"]/z3["ab_sum.x"])
+print(z3["tb_sum.y"]/z3["ab_sum.y"])
+
+# 出塁率
+print((z3["bb_sum.x"]+z3["h_sum.x"]+z3["hbp_sum.x"])/(z3["ab_sum.x"]+z3["bb_sum.x"]+z3["hbp_sum.x"]+z3["sf_sum.x"]))
+print((z3["bb_sum.y"]+z3["h_sum.y"]+z3["hbp_sum.y"])/(z3["ab_sum.y"]+z3["bb_sum.y"]+z3["hbp_sum.y"]+z3["sf_sum.y"]))
+
+batter_non_ibb %>%
+  dplyr::select(-lag_runner_situation) %>% 
+  colMeans()
+```
+
+```{r 共変量作成：敬遠時(ibb_X)}
+#####
+# cbind用のデータフレーム
+#####
+# pitcher → now_batter → next_batterの流れで結合
+pitcher_ibb2 <- pitcher_ibb %>%
+  dplyr::select(pitcher_id, inning_total, OAV, K_prob, BB_prob)
+pitcher_ibb2 <- distinct(inner_join(FB_esc, pitcher_ibb2, by="pitcher_id"),.keep_all=TRUE)
+
+batter_ibb2 <- batter_ibb %>%
+  dplyr::select(batter_id, AVE, SLG, OBP, pa_sum)  %>%
+  rename('now_id'=batter_id)
+
+next_ibb2 <- next_b_ibb %>%
+  dplyr::select(batter_id, AVE, SLG, OBP, pa_sum, pre_out, post_out)  %>%
+  rename('next_id'=batter_id) %>% 
+  rename('next_pre_out'=pre_out) %>% 
+  rename('next_post_out'=post_out)
+
+#####
+# 現在の打者情報を追加(pitcher_ibb2に)
+ibb_X <- pitcher_ibb2 %>%
+  cbind(batter_ibb2) %>%
+  rename("AVE_now"=AVE) %>%
+  rename("SLG_now"=SLG) %>%
+  rename("OBP_now"=OBP) %>%
+  rename("pa_sum_now"=pa_sum) %>%
+# 次の打者情報を追加
+  cbind(next_ibb2) %>%
+  rename("AVE_next"=AVE) %>%
+  rename("SLG_next"=SLG) %>%
+  rename("OBP_next"=OBP) %>%
+  rename("pa_sum_next"=pa_sum)
+
+# 状況と共変量情報だけを抽出
+ibb_X <- ibb_X %>%
+  dplyr::select(inning, top_bottom_id, next_pre_out, next_post_out, pre_runner_situation, 
+         inning_total, OAV,K_prob,BB_prob,   # 投手情報
+         AVE_now,SLG_now,OBP_now,pa_sum_now, # 打者情報
+         AVE_next,SLG_next,OBP_next,pa_sum_next # 次の打者情報
+         ) %>%
+  mutate(flag=1) %>% 
+# 次のバッターのアウト情報
+  rename("pre_out"=next_pre_out) %>% 
+  rename("post_out"=next_post_out)
+```
+
+```{r 共変量作成：敬遠しない時(non_ibb_X)}
+#####
+# cbind用のデータフレーム
+#####
+pitcher_non_ibb2 <- pitcher_non_ibb %>%
+  dplyr::select(pitcher_id, inning_total, OAV, K_prob, BB_prob)
+pitcher_non_ibb2 <- distinct(inner_join(inning_non_ibb, pitcher_non_ibb2, by="pitcher_id"),.keep_all=TRUE)
+
+batter_non_ibb2 <- batter_non_ibb %>%
+  dplyr::select(lag_inning, lag_top_bottom_id, lag_pre_out, lag_post_out, lag_runner_situation, 
+          lag_pitcher_id, inning_total, OAV, K_prob, BB_prob,
+          batter_id, AVE.y, SLG.y, OBP.y, pa_sum.y,
+          AVE.x, SLG.x, OBP.x, pa_sum.x)  %>%
+  rename('now_id'=batter_id)
+
+#####
+# 現在の打者情報を追加
+non_ibb_X <- batter_non_ibb2 %>%
+  rename("inning"=lag_inning) %>% 
+  rename("top_bottom_id"=lag_top_bottom_id) %>% 
+  rename("pre_out"=lag_pre_out) %>% 
+  rename("post_out"=lag_post_out) %>% 
+  rename("pre_runner_situation"=lag_runner_situation) %>% 
+  dplyr::select(-lag_pitcher_id,-now_id) %>% 
+  rename("AVE_now"=AVE.y) %>%
+  rename("SLG_now"=SLG.y) %>%
+  rename("OBP_now"=OBP.y) %>%
+  rename("pa_sum_now"=pa_sum.y) %>%
+# 次の打者情報を追加
+  rename("AVE_next"=AVE.x) %>%
+  rename("SLG_next"=SLG.x) %>%
+  rename("OBP_next"=OBP.x) %>%
+  rename("pa_sum_next"=pa_sum.x)
+  
+# 状況と共変量情報だけを抽出
+non_ibb_X <- non_ibb_X %>%
+  mutate(flag=0)
+```
+
+## 傾向スコア
+```{r 共変量調整}
+# 205例(1) + 5454例(0) = 5659例
+ps_data <- dplyr::bind_rows(ibb_X, non_ibb_X) %>% 
+  rename("treatment"=flag)
+
+# アウトカムY(アウト:0, セーフ:1)
+ps_data <- ps_data %>% 
+  mutate(y=if_else(pre_out!=post_out, 1, 0))
+
+# 塁固定
+ps_data_22 <- ps_data %>% 
+  filter(pre_out==2) %>% 
+  filter(pre_runner_situation=='010')
+ps_data_223 <- ps_data %>% 
+  filter(pre_out==2) %>% 
+  filter(pre_runner_situation=='011')
+ps_data_23 <- ps_data %>% 
+  filter(pre_out==2) %>% 
+  filter(pre_runner_situation=='001')
+ps_data_12 <- ps_data %>% 
+  filter(pre_out==1) %>% 
+  filter(pre_runner_situation=='010')
+ps_data_123 <- ps_data %>% 
+  filter(pre_out==1) %>% 
+  filter(pre_runner_situation=='011')
+
+ps_model <- glm(treatment ~ inning_total+OAV+K_prob+BB_prob
+                +AVE_now+SLG_now+OBP_now+pa_sum_now
+                +AVE_next+SLG_next+OBP_next+pa_sum_next, data = ps_data_22, family = binomial)
+summary(ps_model)
+```
+
+```{r matchit当てはめ}
+library(MatchIt)
+library(cobalt)
+library(broom)
+library(lmtest)
+library(WeightIt)
+library(modelsummary)
+
+# マッチング比
+r <- 2
+# マッチング法 : 最近傍マッチング
+meth <- "nearest"
+# キャリパー
+c <- 1
+
+# 傾向スコアの算出
+m_near_22 <- matchit(treatment ~ inning_total+OAV+K_prob+BB_prob+SLG_now+OBP_now+pa_sum_now
+                +SLG_next+OBP_next+pa_sum_next, data = ps_data_22,  distance = "glm",
+                method = meth,
+                caliper = c,
+                ratio = r,   # 1:rのマッチング
+                replace = FALSE, estimand = "ATT")
+
+m_near_223 <- matchit(treatment ~ inning_total+OAV+K_prob+BB_prob+SLG_now+OBP_now+pa_sum_now
+                +SLG_next+OBP_next+pa_sum_next, data = ps_data_223,  distance = "glm",
+                method = meth,
+                caliper = c,
+                ratio = r, replace = FALSE, estimand = "ATT")
+
+m_near_23 <- matchit(treatment ~ inning_total+OAV+K_prob+BB_prob+SLG_now+OBP_now+pa_sum_now
+                +SLG_next+OBP_next+pa_sum_next, data = ps_data_23,  distance = "glm",
+                method = meth,
+                caliper = c,
+                ratio = r, replace = FALSE, estimand = "ATT")
+
+m_near_12 <- matchit(treatment ~ inning_total+OAV+K_prob+BB_prob+SLG_now+OBP_now+pa_sum_now
+                +SLG_next+OBP_next+pa_sum_next, data = ps_data_12,  distance = "glm",
+                method = meth,
+                caliper = c,
+                ratio = r, replace = FALSE, estimand = "ATT")
+
+m_near_123 <- matchit(treatment ~ inning_total+OAV+K_prob+BB_prob+SLG_now+OBP_now+pa_sum_now
+                +SLG_next+OBP_next+pa_sum_next, data = ps_data_123,  distance = "glm",
+                method = meth,
+                caliper = c,
+                ratio = r, replace = FALSE, estimand = "ATT")
+```
+
+```{r 図形表示}
+# 対象データ
+# data <- ps_data_23
+near <- m_near_123
+
+# summary(data)
+summary(near)
+# インバランスのplot
+plot(near, type = "hist", interactive = FALSE)
+plot(near, type = "QQ", interactive = FALSE)
+plot(near, type = "jitter", interactive = FALSE)
+love.plot(near, threshold = .1, abs = T)
+bal.plot(near, which = "both",
+          type = "histogram", mirror = TRUE,
+          sample.names = c("Before", "After"))
+bal.tab(near, thresholds = 0.1) # 標準化平均差
+bal.tab(near,v.threshold=2)   # 分散比(平均の確率変数に関する2次モーメント)
+```
+## 練習
+```{r}
+library(tableone)
+tabafter <- 
+CreateTableOne(vars = myVars,
+data = match_data,
+strata = 'Treat',
+smd = T)
+tabafter <- print(tabafter,
+printToggle = FALSE,
+noSpaces = TRUE,smd=TRUE)
+tabafter;
+```
+
+```{r 推定結果}
+## 傾向スコアマッチング後のデータを抽出
+match_data_22 <- match.data(m_near_22)
+match_data_23 <- match.data(m_near_23)
+match_data_223 <- match.data(m_near_223)
+match_data_12 <- match.data(m_near_12)
+match_data_123 <- match.data(m_near_123)
+
+## 処置効果の推定
+PSM_result_22_s <- match_data_22 %>% 
+  lm(y ~ treatment, data = .) 
+PSM_result_22_m <- match_data_22 %>% 
+  lm(y ~ treatment+inning_total+OAV+K_prob+BB_prob
+                +SLG_now+OBP_now+pa_sum_now
+                +SLG_next+OBP_next+pa_sum_next, data = .) 
+
+PSM_result_23_s <- match_data_23 %>% 
+  lm(y ~ treatment, data = .) 
+PSM_result_23_m <- match_data_23 %>% 
+  lm(y ~ treatment+inning_total+OAV+K_prob+BB_prob
+                +SLG_now+OBP_now+pa_sum_now+SLG_next+OBP_next+pa_sum_next, data = .) 
+
+PSM_result_223_s <- match_data_223 %>% 
+  lm(y ~ treatment, data = .) 
+PSM_result_223_m <- match_data_223 %>% 
+  lm(y ~ treatment+inning_total+OAV+K_prob+BB_prob
+                +SLG_now+OBP_now+pa_sum_now+SLG_next+OBP_next+pa_sum_next, data = .) 
+
+PSM_result_12_s <- match_data_12 %>% 
+  lm(y ~ treatment, data = .) 
+PSM_result_12_m <- match_data_12 %>% 
+  lm(y ~ treatment+inning_total+OAV+K_prob+BB_prob
+                +SLG_now+OBP_now+pa_sum_now+SLG_next+OBP_next+pa_sum_next, data = .) 
+
+PSM_result_123_s <- match_data_123 %>% 
+  lm(y ~ treatment, data = .) 
+PSM_result_123_m <- match_data_123 %>% 
+  lm(y ~ treatment+inning_total+OAV+K_prob+BB_prob
+                +SLG_now+OBP_now+pa_sum_now+SLG_next+OBP_next+pa_sum_next, data = .) 
+
+# 調べながらやってるから、t検定であってるかは要検討
+# coeftest(PSM_result3)
+# coefci(PSM_result3)
+# coeftest(PSM_result4)
+# coefci(PSM_result4)
+
+situ_12 <- sum(m_near_12$treat)
+situ_123 <- sum(m_near_123$treat)
+situ_22 <- sum(m_near_22$treat)
+situ_23 <- sum(m_near_23$treat)
+situ_223 <- sum(m_near_223$treat)
+situ_all <- situ_12+situ_123+situ_22+situ_223+situ_23
+
+modelsummary(list("PS_22 (単回帰)"   = PSM_result_22_s,
+                  "PS_22 (重回帰)"   = PSM_result_22_m,
+                  "PS_23 (単回帰)"   = PSM_result_23_s,
+                  "PS_23 (重回帰)"   = PSM_result_23_m,
+                  "PS_223 (単回帰)"   = PSM_result_223_s,
+                  "PS_223 (重回帰)"   = PSM_result_223_m,
+                  "PS_12 (単回帰)"   = PSM_result_12_s,
+                  "PS_12 (重回帰)"   = PSM_result_12_m,
+                  "PS_123 (単回帰)"   = PSM_result_123_s,
+                  "PS_123 (重回帰)"   = PSM_result_123_m))
+
+att_df <- bind_rows(list("Simple_2out 2" = tidy(PSM_result_22_s, conf.int = TRUE),
+                         "Multiple_2out 2" = tidy(PSM_result_22_m, conf.int = TRUE),
+                         "Simple_2out 3" = tidy(PSM_result_23_s, conf.int = TRUE),
+                         "Multiple_2out 3" = tidy(PSM_result_23_m, conf.int = TRUE),
+                         "Simple_2out 23" = tidy(PSM_result_223_s, conf.int = TRUE),
+                         "Multiple_2out 23" = tidy(PSM_result_223_m, conf.int = TRUE),
+                         "Simple_1out 2" = tidy(PSM_result_12_s, conf.int = TRUE),
+                         "Multiple_1out 2" = tidy(PSM_result_12_m, conf.int = TRUE),
+                         "Simple_1out 23" = tidy(PSM_result_123_s, conf.int = TRUE),
+                         "Multiple_1out 23" = tidy(PSM_result_123_m, conf.int = TRUE)),
+                    .id = "Model")
+att_df <- att_df %>% 
+  filter(term == "treatment") %>%  
+  separate(col  = Model,
+           into = c("Regression", "Method"),
+           sep  = "_")
+
+# 図の表示
+att_df %>% 
+  mutate(Regression = fct_inorder(Regression),
+         Method     = fct_inorder(Method),
+         Method     = fct_rev(Method)) %>%  # 縦軸の順序を逆転
+  ggplot() +
+  geom_vline(xintercept = 0) +
+  geom_pointrange(aes(x = estimate, y = Method,
+                      xmin = conf.low, xmax = conf.high,
+                      color = Regression),
+                  position = position_dodge2(1/2)) +
+  labs(x = "ATT effect", y = "situation", color = "PS model") +
+  theme_bw(base_size = 12)
+```
+```{r ATTの層別効果(全体の統合)}
+att_df_s <- att_df %>% 
+  filter(Regression=='Simple')
+att_df_m <- att_df %>% 
+  filter(Regression=='Multiple')
+
+# Simple
+conf_low_s <- att_df_s[1,]$conf.low*situ_22/situ_all + att_df_s[2,]$conf.low*situ_23/situ_all + att_df_s[3,]$conf.low*situ_223/situ_all + 
+  att_df_s[4,]$conf.low*situ_12/situ_all + att_df_s[5,]$conf.low*situ_123/situ_all
+conf_high_s <- att_df_s[1,]$conf.high*situ_22/situ_all + att_df_s[2,]$conf.high*situ_23/situ_all + att_df_s[3,]$conf.high*situ_223/situ_all + 
+  att_df_s[4,]$conf.high*situ_12/situ_all + att_df_s[5,]$conf.high*situ_123/situ_all
+estimate_s <- att_df_s[1,]$estimate*situ_22/situ_all + att_df_s[2,]$estimate*situ_23/situ_all + att_df_s[3,]$estimate*situ_223/situ_all + 
+  att_df_s[4,]$estimate*situ_12/situ_all + att_df_s[5,]$estimate*situ_123/situ_all
+p.value_s <- att_df_s[1,]$p.value*situ_22/situ_all + att_df_s[2,]$p.value*situ_23/situ_all + att_df_s[3,]$p.value*situ_223/situ_all + 
+  att_df_s[4,]$p.value*situ_12/situ_all + att_df_s[5,]$p.value*situ_123/situ_all
+
+# Multiple
+conf_low_m <- att_df_m[1,]$conf.low*situ_22/situ_all + att_df_m[2,]$conf.low*situ_23/situ_all + att_df_m[3,]$conf.low*situ_223/situ_all + 
+  att_df_m[4,]$conf.low*situ_12/situ_all + att_df_m[5,]$conf.low*situ_123/situ_all
+conf_high_m <- att_df_m[1,]$conf.high*situ_22/situ_all + att_df_m[2,]$conf.high*situ_23/situ_all + att_df_m[3,]$conf.high*situ_223/situ_all + 
+  att_df_m[4,]$conf.high*situ_12/situ_all + att_df_m[5,]$conf.high*situ_123/situ_all
+estimate_m <- att_df_m[1,]$estimate*situ_22/situ_all + att_df_m[2,]$estimate*situ_23/situ_all + att_df_m[3,]$estimate*situ_223/situ_all + 
+  att_df_m[4,]$estimate*situ_12/situ_all + att_df_m[5,]$estimate*situ_123/situ_all
+p.value_m <- att_df_m[1,]$p.value*situ_22/situ_all + att_df_m[2,]$p.value*situ_23/situ_all + att_df_m[3,]$p.value*situ_223/situ_all + 
+  att_df_m[4,]$p.value*situ_12/situ_all + att_df_m[5,]$p.value*situ_123/situ_all
+
+# att_allの作成
+att_all <- data.frame(estimate=c(estimate_s, estimate_m), conf.low=c(conf_low_s, conf_low_m), conf.high=c(conf_high_s, conf_high_m), p.value=c(p.value_s, p.value_m), m=c('Simple','Multiple'))
+att_all %>%
+  mutate(m  = fct_rev(m)) %>%  # 縦軸の順序を逆転
+  ggplot() +
+  geom_vline(xintercept = 0) +
+  geom_pointrange(aes(x = estimate, y = m,
+                      xmin = conf.low, xmax = conf.high,
+                      color = m),
+                  position = position_dodge2(1/2)) +
+  labs(x = "ATT", y = "PS model", color = "PS model") +
+       # ,caption = " replace = False, method = nearest, 1:2 matching"
+  theme_bw(base_size = 12)
+```
+
+```{r IPW}
+## IPW
+weighting <- weightit(flag ~ inning_total+OAV+K_prob+BB_prob
+                +AVE_now+SLG_now+OBP_now+pa_sum_now
+                +AVE_next+SLG_next+OBP_next+pa_sum_next, data = ps_data, 
+                ### 傾向スコアを用いることを指定
+                method = "ps", 
+                ### ATEを推定する(ATTも指定可能)
+                estimated  ="ATT")
+love.plot(weighting, threshold = .1, abs = T)
+
+IPW_result <- lm(spend ~ treatment, data = biased_data,
+                 weights = weighting$weights) %>% 
+  
+match_data <- match.data(m_near)
+
+match_data %>%
+  lm()
+```
+
